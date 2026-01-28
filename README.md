@@ -44,6 +44,50 @@ uv run .\main.py --input ".\data\calls" --recursive --no_spectral --out_csv ".\q
 
 ---
 
+## API (FastAPI)
+
+### Run server
+
+```powershell
+uv run uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+### 1) Single file (upload)
+
+**Endpoint:** `POST /api/v1/analyze/file`  
+**Form field:** `file` (wav)  
+**Query params:** `save_json` (bool), `out_dir` (path), `include_segments` (bool), `no_spectral` (bool)
+
+Example:
+
+```powershell
+curl -F "file=@.\data\calls\sample_90s_test.wav" "http://127.0.0.1:8000/api/v1/analyze/file?save_json=true&out_dir=qc_results"
+```
+
+### 2) Batch (folder)
+
+**Endpoint:** `POST /api/v1/analyze/batch`  
+**Body:** JSON
+
+```json
+{
+  "input_path": ".\\data\\calls",
+  "recursive": true,
+  "out_dir": "qc_results",
+  "include_segments": false,
+  "save_json": true,
+  "return_results": false
+}
+```
+
+Results are saved in `out_dir` using the same base filename as the input wav (e.g., `sample_90s_test.wav` → `sample_90s_test.json`).
+
+### Health check
+
+`GET /health`
+
+---
+
 ## Output
 
 ### 1) `qc_report.csv`

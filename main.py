@@ -37,10 +37,15 @@ import math
 import os
 import sys
 import glob
+import shutil
+import tempfile
 from dataclasses import dataclass
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import numpy as np
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Body
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field
 
 # Optional deps
 try:
@@ -57,6 +62,7 @@ except Exception:
 
 
 EPS = 1e-12
+DEFAULT_RESULTS_DIR = "qc_results"
 
 
 @dataclass
@@ -793,6 +799,222 @@ def write_json_segments(rows: List[Dict[str, Any]], out_dir: str):
         name = os.path.splitext(base)[0] + ".json"
         with open(os.path.join(out_dir, name), "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def ensure_dir(path: str) -> str:
+    if not path:
+        raise ValueError("Output directory path is empty")
+    os.makedirs(path, exist_ok=True)
+    return os.path.abspath(path)
+
+
+def sanitize_for_json(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_for_json(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [sanitize_for_json(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return sanitize_for_json(obj.tolist())
+    if isinstance(obj, np.floating):
+        val = float(obj)
+        return val if math.isfinite(val) else None
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    return obj
+
+
+def prepare_result_for_response(
+    result: Dict[str, Any],
+    include_segments: bool,
+    file_name_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = dict(result)
+    if file_name_override:
+        clean_name = os.path.basename(file_name_override)
+        payload["file_name"] = clean_name
+        payload["file_path"] = clean_name
+
+    cleaned = sanitize_for_json(payload)
+    if not include_segments:
+        cleaned.pop("_segments", None)
+    return cleaned
+
+
+def save_result_json(
+    result: Dict[str, Any],
+    out_dir: str,
+    include_segments: bool,
+    file_name_override: Optional[str] = None,
+) -> str:
+    out_dir = ensure_dir(out_dir)
+    base = os.path.basename(
+        file_name_override
+        or result.get("file_name")
+        or result.get("file_path")
+        or "audio.wav"
+    )
+    name = os.path.splitext(base)[0] + ".json"
+    out_path = os.path.join(out_dir, name)
+    payload = prepare_result_for_response(
+        result,
+        include_segments=include_segments,
+        file_name_override=file_name_override,
+    )
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return out_path
+
+
+def analyze_paths(
+    paths: List[str],
+    cfg: QCConfig,
+    compute_spectral: bool,
+) -> tuple[list[Dict[str, Any]], list[Dict[str, str]]]:
+    rows: list[Dict[str, Any]] = []
+    errors: list[Dict[str, str]] = []
+    for p in paths:
+        try:
+            rows.append(analyze_wav(p, cfg, compute_spectral=compute_spectral))
+        except Exception as e:
+            errors.append({"path": p, "error": str(e)})
+    return rows, errors
+
+
+def save_upload_to_temp(upload: UploadFile) -> str:
+    suffix = os.path.splitext(upload.filename or "")[1] or ".wav"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        upload.file.seek(0)
+        shutil.copyfileobj(upload.file, tmp)
+        return tmp.name
+
+
+class BatchRequest(BaseModel):
+    input_path: str = Field(..., description="Directory, glob pattern, or file path")
+    recursive: bool = False
+    out_dir: str = Field(DEFAULT_RESULTS_DIR, description="Directory for per-file JSON results")
+    no_spectral: bool = False
+    include_segments: bool = False
+    save_json: bool = True
+    return_results: bool = True
+
+
+app = FastAPI(title="Audio QC API", version="0.1.0")
+
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "ok",
+        "soundfile": HAS_SF,
+        "scipy": HAS_SCIPY,
+    }
+
+
+@app.post("/api/v1/analyze/file")
+async def analyze_file(
+    file: UploadFile = File(...),
+    save_json: bool = Query(True),
+    out_dir: str = Query(DEFAULT_RESULTS_DIR),
+    include_segments: bool = Query(False),
+    no_spectral: bool = Query(False),
+):
+    if not HAS_SF:
+        raise HTTPException(status_code=500, detail="soundfile not installed on server")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    if not file.filename.lower().endswith(".wav"):
+        raise HTTPException(status_code=400, detail="Only .wav files are supported")
+    if save_json and not out_dir:
+        raise HTTPException(status_code=400, detail="out_dir is required when save_json is true")
+
+    cfg = QCConfig()
+    tmp_path = await run_in_threadpool(save_upload_to_temp, file)
+    try:
+        result = await run_in_threadpool(
+            analyze_wav,
+            tmp_path,
+            cfg,
+            not no_spectral,
+        )
+    finally:
+        await file.close()
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    clean_name = os.path.basename(file.filename)
+    result_payload = prepare_result_for_response(
+        result,
+        include_segments=include_segments,
+        file_name_override=clean_name,
+    )
+
+    saved_path = None
+    if save_json:
+        saved_path = await run_in_threadpool(
+            save_result_json,
+            result,
+            out_dir,
+            include_segments,
+            clean_name,
+        )
+
+    return {
+        "result": result_payload,
+        "saved_json_path": saved_path,
+    }
+
+
+@app.post("/api/v1/analyze/batch")
+async def analyze_batch(req: BatchRequest = Body(...)):
+    if not HAS_SF:
+        raise HTTPException(status_code=500, detail="soundfile not installed on server")
+    if not req.input_path:
+        raise HTTPException(status_code=400, detail="input_path is required")
+    if req.save_json and not req.out_dir:
+        raise HTTPException(status_code=400, detail="out_dir is required when save_json is true")
+
+    paths = list_wav_paths(req.input_path, recursive=req.recursive)
+    if not paths:
+        raise HTTPException(status_code=404, detail="No wav files found")
+
+    cfg = QCConfig()
+
+    def _run_batch():
+        rows, errors = analyze_paths(paths, cfg, compute_spectral=(not req.no_spectral))
+        saved = []
+        if req.save_json:
+            for r in rows:
+                saved.append(
+                    save_result_json(
+                        r,
+                        req.out_dir,
+                        req.include_segments,
+                    )
+                )
+        return rows, errors, saved
+
+    rows, errors, saved_paths = await run_in_threadpool(_run_batch)
+
+    response: Dict[str, Any] = {
+        "count": len(rows),
+        "errors": errors,
+        "saved_json_paths": saved_paths,
+    }
+    if req.return_results:
+        response["results"] = [
+            prepare_result_for_response(r, include_segments=req.include_segments)
+            for r in rows
+        ]
+
+    return response
 
 
 def main():
