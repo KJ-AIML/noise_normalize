@@ -1,0 +1,11 @@
+[project]
+name = "noise-normalize"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.4.1",
+    "scipy>=1.17.0",
+    "soundfile>=0.13.1",
+]
