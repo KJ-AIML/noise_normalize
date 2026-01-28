@@ -100,6 +100,134 @@ Results are saved in `out_dir` using the same base filename as the input wav (e.
 * per-channel speech segments
 * ใช้ทำ visualization / debug ได้
 
+
+## Output fields (ครบทุกค่า) — แบ่งตามหมวด
+
+> หมายเหตุ: ถ้าเป็นไฟล์ mono (1 channel) ค่า `_ch1` จะเป็น NaN หรือไม่ meaningful  
+> และ `_segments` จะมีเฉพาะตอนเลือกบันทึก JSON segments
+
+### A) Metadata / File info
+
+* `file_name` — ชื่อไฟล์
+* `file_path` — path ของไฟล์ (ใน API จะเป็นชื่อไฟล์)
+* `format`, `subtype` — format/subtype ของไฟล์จาก soundfile
+* `sample_rate` — sample rate (Hz)
+* `channels` — จำนวน channel
+* `duration_sec` — ความยาวไฟล์ (วินาที)
+
+### B) Level / Loudness
+
+* `peak_dbfs_max` — peak สูงสุด (dBFS)
+* `peak_dbfs_ch0`, `peak_dbfs_ch1` — peak ราย channel
+* `rms_dbfs_mean` — RMS เฉลี่ย (dBFS)
+* `rms_dbfs_ch0`, `rms_dbfs_ch1` — RMS ราย channel
+* `crest_db_mean` — crest factor (Peak - RMS)
+* `lufs_i` — integrated LUFS (approx)
+
+### C) Speech / Silence (VAD)
+
+* `speech_ratio_any` — สัดส่วนเวลามีเสียงพูด (รวมทุก channel)
+* `speech_ratio_ch0`, `speech_ratio_ch1` — สัดส่วนเสียงพูดราย channel
+* `num_speech_segments_any` — จำนวนช่วงพูด (หลัง smooth)
+* `num_speech_segments_ch0`, `num_speech_segments_ch1`
+* `avg_speech_segment_s_any` — ความยาวเฉลี่ยของช่วงพูด
+* `avg_speech_segment_s_ch0`, `avg_speech_segment_s_ch1`
+* `max_silence_s_ch0`, `max_silence_s_ch1` — silence ยาวสุด
+* `initial_silence_s_ch0`, `initial_silence_s_ch1` — silence ตอนเริ่มไฟล์
+* `speech_dropout_ratio_proxy` — proxy ว่าช่วงพูดอ่อนจนเกือบ noise floor
+
+### D) Noise / Dropouts / Clipping
+
+* `noise_floor_dbfs_mean` — noise floor เฉลี่ย (dBFS)
+* `noise_floor_dbfs_ch0`, `noise_floor_dbfs_ch1`
+* `est_snr_db_best` — SNR ที่ดีที่สุด (ประมาณ)
+* `est_snr_db_ch0`, `est_snr_db_ch1`
+* `clipping_pct_max` — % sample ที่ clipping สูงสุด
+* `clipping_pct_ch0`, `clipping_pct_ch1`
+* `zero_pct_max` — % sample ใกล้ศูนย์
+* `longest_zero_run_ms_max` — ช่วง near-zero ยาวสุด (ms)
+* `longest_zero_run_ms_ch0`, `longest_zero_run_ms_ch1`
+
+### E) Stereo / Conversation dynamics (เฉพาะ stereo)
+
+* `overlap_ratio` — สัดส่วนเวลาที่ทั้ง ch0 & ch1 เป็น speech (double-talk proxy)
+* `channel_corr_01` — correlation ระหว่าง ch0/ch1
+* `crosstalk_db_01` — proxy การรั่วเสียงระหว่าง channel
+
+### F) Spectral / Hum / Echo
+
+* `spectral_centroid_hz_speech`, `spectral_centroid_hz_noise`
+* `spectral_flatness_speech`, `spectral_flatness_noise`
+* `spectral_rolloff95_hz_speech`, `spectral_rolloff95_hz_noise`
+* `hum50_ratio`, `hum60_ratio` — proxy hum รอบ 50/60 Hz
+* `echo_proxy_corr` — proxy echo จาก autocorr ของ envelope
+
+### G) Flags
+
+* `flags` — ธงเตือน (คั่นด้วย `|`)
+
+### H) Optional segments (เมื่อ export JSON segments)
+
+* `_segments.frame_ms`, `_segments.hop_ms`
+* `_segments.speech_any` — list ของช่วงเวลาที่พูด (รวมทุก channel)
+* `_segments.speech_per_channel` — list ของช่วงพูดราย channel
+
+---
+
+## Processing factors (สิ่งที่มีผลต่อผลลัพธ์)
+
+ค่าเหล่านี้อยู่ใน `QCConfig` ใน `main.py` และมีผลต่อผลลัพธ์:
+
+* `frame_ms`, `hop_ms` — ขนาดเฟรมสำหรับคำนวณพลังงาน/VAD
+* `vad_margin_db`, `vad_abs_floor_db` — เกณฑ์แยก speech/noise
+* `min_speech_ms`, `min_silence_ms` — smooth ช่วงพูด/เงียบให้ไม่สั้นเกินไป
+* `clip_threshold` — ค่าที่ถือว่า clipping (ใกล้ 1.0)
+* `near_zero_threshold` — ค่าที่ถือว่า near-zero (dropout)
+* `echo_probe_seconds`, `echo_env_hz`, `echo_lag_min_ms`, `echo_lag_max_ms`
+* `spectral_fft_ms`, `spectral_hop_ms`, `rolloff_pct`
+* `hum_band_hz`, `hum_max_harmonic_hz`
+
+---
+
+## Flags และเกณฑ์ (ทั้งหมด)
+
+* `unusual_sample_rate` → `sample_rate` ไม่ใช่ 8000/16000/44100/48000
+* `low_speech_ratio` → `speech_ratio_any < 0.15`
+* `low_snr` → `est_snr_db_best < 10 dB`
+* `clipping` → `clipping_pct_max > 0.10`
+* `dropouts_or_dead_samples` → `longest_zero_run_ms_max > 500 ms`
+* `high_overlap_double_talk` → `overlap_ratio > 0.20` (stereo)
+* `too_quiet_lufs` → `lufs_i < -40`
+* `too_loud_lufs` → `lufs_i > -12`
+
+> เกณฑ์ทั้งหมดปรับได้ใน `QCConfig` ตามประเภทงาน/โดเมน
+
+---
+
+## Visualization (การ plot เพื่อวิเคราะห์)
+
+> หมายเหตุเพิ่มเติมเรื่องกราฟ:
+> - ถ้าค่าของ metric ใด ๆ เหมือนกันเกือบทั้งหมด (เช่น `clipping_pct_max = 0` ทุกไฟล์) histogram จะดูเหมือนเป็นแท่งเดียว/แบน ๆ ซึ่ง **ปกติ**
+> - ค่า `clipping_pct_max = 0` แปลว่าไม่มี clipping และ `longest_zero_run_ms_max = 0` แปลว่าไม่มีช่วง near‑zero/dropout ยาว ๆ (ถือว่า **ดี**)
+> - แกน X อาจดูติดค่าลบได้จากการแบ่ง bin รอบศูนย์ ไม่ได้แปลว่าค่าจริงติดลบ
+
+
+แนะนำดูจาก notebook `visualize.ipynb`:
+
+* Histogram: ดูการกระจายของ `lufs_i`, `est_snr_db_best`, `speech_ratio_any`
+* Scatter: ดูความสัมพันธ์ เช่น `lufs_i` vs `est_snr_db_best`
+* ใช้สีแยกแต่ละไฟล์เพื่อดู outlier ง่ายขึ้น
+
+ใน notebook จะมี mapping “ไฟล์ไหน = สีไหน” ให้ดูง่าย เช่น:
+
+```
+F1 -> sample_90s_test.wav (สี #1f77b4)
+F2 -> sample_asr_test.wav (สี #ff7f0e)
+F3 -> sample_30s.wav     (สี #2ca02c)
+```
+
+> ถ้าไฟล์เพิ่ม/ลด สีจะปรับตามลำดับใน `qc_results/*.json`
+
 ---
 
 ## คำศัพท์พื้นฐานที่ควรรู้

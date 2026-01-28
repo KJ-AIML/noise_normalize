@@ -12,3 +12,11 @@ dependencies = [
     "soundfile>=0.13.1",
     "uvicorn>=0.29.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.1.0",
+    "matplotlib>=3.10.8",
+    "pandas>=3.0.0",
+    "seaborn>=0.13.2",
+]

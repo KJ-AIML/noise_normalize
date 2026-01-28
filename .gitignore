@@ -6,8 +6,14 @@ dist/
 wheels/
 *.egg-info
 
+# Jupyter notebooks
+.ipynb_checkpoints/
+
 # Virtual environments
 .venv
 
 # Output directories
 qc_results/
+
+# Data directories
+data/
