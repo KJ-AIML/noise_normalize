@@ -18,5 +18,6 @@ dev = [
     "ipykernel>=7.1.0",
     "matplotlib>=3.10.8",
     "pandas>=3.0.0",
+    "plotly>=6.5.2",
     "seaborn>=0.13.2",
 ]

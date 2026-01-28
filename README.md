@@ -88,6 +88,50 @@ Results are saved in `out_dir` using the same base filename as the input wav (e.
 
 ---
 
+## Jupyter / Visualization
+
+### เตรียม dependencies
+
+ติดตั้ง libraries สำหรับ visualization:
+
+```powershell
+uv add --dev matplotlib pandas seaborn plotly ipykernel
+```
+
+### เริ่ม Jupyter Lab
+
+เริ่ม Jupyter Lab โดยไม่ต้องใช้ token (เหมาะสำหรับ local dev):
+
+```powershell
+uv run --with jupyter jupyter lab --NotebookApp.token='' --NotebookApp.password=''
+```
+
+จะได้ Jupyter Lab ที่ http://localhost:8888/lab หรือ http://127.0.0.1:8888/lab
+
+### สร้าง kernel สำหรับ VS Code (optional)
+
+ถ้าต้องการใช้ Jupyter ผ่าน VS Code ให้สร้าง kernel ก่อน:
+
+```powershell
+uv run ipython kernel install --user --env VIRTUAL_ENV %cd%\.venv --name=noise-normalize
+```
+
+จากนั้นใน VS Code:
+1. เปิด notebook `.ipynb`
+2. เลือก kernel `noise-normalize` ที่มุมขวาบน
+
+### ใช้ Jupyter พร้อม token (แนะนำสำหรับ security)
+
+ถ้าต้องการความปลอดภัยมากกว่า:
+
+```powershell
+uv run --with jupyter jupyter lab
+```
+
+จะได้ URL พร้อม token เช่น `http://127.0.0.1:8888/lab?token=...` ให้ copy ไปใช้ใน browser
+
+---
+
 ## Output
 
 ### 1) `qc_report.csv`
