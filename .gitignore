@@ -9,6 +9,9 @@ wheels/
 # Jupyter notebooks
 .ipynb_checkpoints/
 
+# Ruff cache
+.ruff_cache/
+
 # Virtual environments
 .venv
 

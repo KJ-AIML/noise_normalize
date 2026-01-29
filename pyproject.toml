@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.110.0",
     "numpy>=2.4.1",
     "python-multipart>=0.0.9",
+    "ruff>=0.14.14",
     "scipy>=1.17.0",
     "soundfile>=0.13.1",
     "uvicorn>=0.29.0",
@@ -15,9 +16,14 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "colorlog>=6.7.0",
+    "ffmpeg-normalize>=1.36.1",
+    "ffmpeg-progress-yield>=1.1.1",
     "ipykernel>=7.1.0",
     "matplotlib>=3.10.8",
+    "mutagen>=1.47.0",
     "pandas>=3.0.0",
     "plotly>=6.5.2",
     "seaborn>=0.13.2",
+    "tqdm>=4.67.1",
 ]
