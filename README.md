@@ -82,6 +82,46 @@ curl -F "file=@.\data\calls\sample_90s_test.wav" "http://127.0.0.1:8000/api/v1/a
 
 Results are saved in `out_dir` using the same base filename as the input wav (e.g., `sample_90s_test.wav` → `sample_90s_test.json`).
 
+
+### 3) Normalize (by flags)
+
+**Endpoint:** `POST /api/v1/normalize/file`  
+**Form fields:** `file` (wav), `flags` (string: `too_quiet_lufs|clipping` หรือ JSON list), `flags_file` (optional JSON file with `flags`)  
+**Query params:** `target_lufs` (default -24), `max_gain_db` (default 12), `limiter_ceiling` (default 0.99), `force_lufs` (default false), `no_gain_limit` (default false), `out_dir` (default `normalized_results`)
+
+Example:
+
+```powershell
+curl -F "file=@.\data\calls\sample_90s_test.wav" -F "flags=too_quiet_lufs|clipping" "http://127.0.0.1:8000/api/v1/normalize/file?target_lufs=-24"
+```
+
+Returns normalized file path + actions taken.
+
+
+### 4) Normalize (batch)
+
+**Endpoint:** `POST /api/v1/normalize/batch`  
+**Body:** JSON
+
+```json
+{
+  "input_path": ".\data\calls",
+  "recursive": true,
+  "out_dir": "normalized_results",
+  "flags_map_path": ".\data\csv\noise_report_16000_with_class.csv",
+  "default_flags": "",
+  "target_lufs": -24.0,
+  "max_gain_db": 12.0,
+  "force_lufs": false,
+  "no_gain_limit": false,
+  "limiter_ceiling": 0.99,
+  "return_results": true
+}
+```
+
+- `flags_map_path` รองรับ **CSV/JSON** ที่มีคอลัมน์ `file_name` และ `flags`
+- ถ้าไม่มี mapping จะใช้ `default_flags` กับทุกไฟล์
+
 ### Health check
 
 `GET /health`

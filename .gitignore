@@ -15,5 +15,8 @@ wheels/
 # Output directories
 qc_results/
 
+# Normalized results
+normalized_results/
+
 # Data directories
 data/

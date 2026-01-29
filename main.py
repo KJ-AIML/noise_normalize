@@ -40,10 +40,10 @@ import glob
 import shutil
 import tempfile
 from dataclasses import dataclass
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Iterable
 
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Body
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Body, Form
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
@@ -871,6 +871,136 @@ def save_result_json(
     return out_path
 
 
+def parse_flags(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    text = raw.strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(x).strip() for x in parsed if str(x).strip()]
+        if isinstance(parsed, str):
+            text = parsed
+        else:
+            return []
+    except Exception:
+        pass
+    if "|" in text:
+        parts = text.split("|")
+    elif "," in text:
+        parts = text.split(",")
+    else:
+        parts = [text]
+    return [p.strip() for p in parts if p.strip()]
+
+
+def apply_gain_limiter(x: np.ndarray, gain_db: float, ceiling: float) -> np.ndarray:
+    g = float(10 ** (gain_db / 20.0))
+    y = x * g
+    peak = float(np.max(np.abs(y))) if y.size else 0.0
+    if peak > ceiling > 0:
+        y = y * (ceiling / peak)
+    return y
+
+
+def estimate_lufs_for_gain(x: np.ndarray, sr: int) -> float:
+    if integrated_lufs is not None:
+        try:
+            val = integrated_lufs(x, sr)
+            if np.isfinite(val):
+                return float(val)
+        except Exception:
+            pass
+    # Fallback to RMS dBFS
+    rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+    return dbfs_from_rms(rms)
+
+
+def normalize_audio_by_flags(
+    x: np.ndarray,
+    sr: int,
+    flags: Iterable[str],
+    target_lufs: float,
+    max_gain_db: float,
+    limiter_ceiling: float,
+    force_lufs: bool = False,
+    no_gain_limit: bool = False,
+) -> Dict[str, Any]:
+    flags_set = {f.strip() for f in flags if f and str(f).strip()}
+    actions: List[str] = []
+    manual_flags: List[str] = []
+
+    if x.ndim == 1:
+        mono = x.astype(np.float32, copy=False)
+    else:
+        mono = np.mean(x, axis=1).astype(np.float32, copy=False)
+
+    need_lufs = force_lufs or ("too_quiet_lufs" in flags_set or "too_loud_lufs" in flags_set)
+    if need_lufs:
+        lufs_before = estimate_lufs_for_gain(mono, sr)
+        gain = float(target_lufs - lufs_before) if np.isfinite(lufs_before) else 0.0
+        if not no_gain_limit:
+            gain = max(-max_gain_db, min(max_gain_db, gain))
+        x = apply_gain_limiter(x, gain_db=gain, ceiling=limiter_ceiling)
+        actions.append(f"lufs_gain_db={gain:.2f}")
+        if force_lufs:
+            actions.append("force_lufs")
+
+    if "clipping" in flags_set:
+        x = apply_gain_limiter(x, gain_db=0.0, ceiling=limiter_ceiling)
+        actions.append("limiter")
+
+    # Flags that need manual handling
+    for f in ("low_snr", "dropouts_or_dead_samples", "high_overlap_double_talk", "low_speech_ratio"):
+        if f in flags_set:
+            manual_flags.append(f)
+
+    return {
+        "audio": x,
+        "actions": actions,
+        "manual_flags": manual_flags,
+    }
+
+
+def load_flags_map(path: str) -> Dict[str, str]:
+    if not path:
+        return {}
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"flags_map_path not found: {path}")
+
+    _, ext = os.path.splitext(path)
+    ext = ext.lower().strip(".")
+    mapping: Dict[str, str] = {}
+
+    if ext in ("json",):
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            for k, v in payload.items():
+                mapping[os.path.basename(str(k))] = str(v)
+        elif isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    name = item.get("file_name") or item.get("file_path")
+                    flags = item.get("flags")
+                    if name and flags is not None:
+                        mapping[os.path.basename(str(name))] = str(flags)
+    elif ext in ("csv",):
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                name = row.get("file_name") or row.get("file_path")
+                flags = row.get("flags")
+                if name and flags is not None:
+                    mapping[os.path.basename(str(name))] = str(flags)
+    else:
+        raise ValueError("flags_map_path must be .json or .csv")
+
+    return mapping
+
+
 def analyze_paths(
     paths: List[str],
     cfg: QCConfig,
@@ -901,6 +1031,20 @@ class BatchRequest(BaseModel):
     no_spectral: bool = False
     include_segments: bool = False
     save_json: bool = True
+    return_results: bool = True
+
+
+class NormalizeBatchRequest(BaseModel):
+    input_path: str = Field(..., description="Directory of wavs OR glob pattern OR file path")
+    recursive: bool = False
+    out_dir: str = Field("normalized_results", description="Directory for normalized wav outputs")
+    flags_map_path: str = Field("", description="Optional JSON/CSV path that maps file_name -> flags")
+    default_flags: str = Field("", description="Fallback flags when mapping not found")
+    target_lufs: float = -24.0
+    max_gain_db: float = 12.0
+    limiter_ceiling: float = 0.99
+    force_lufs: bool = False
+    no_gain_limit: bool = False
     return_results: bool = True
 
 
@@ -1015,6 +1159,156 @@ async def analyze_batch(req: BatchRequest = Body(...)):
         ]
 
     return response
+
+
+@app.post("/api/v1/normalize/file")
+async def normalize_file(
+    file: UploadFile = File(...),
+    flags_file: Optional[UploadFile] = File(None),
+    flags: str = Form(""),
+    target_lufs: float = Query(-24.0),
+    max_gain_db: float = Query(12.0),
+    limiter_ceiling: float = Query(0.99),
+    force_lufs: bool = Query(False),
+    no_gain_limit: bool = Query(False),
+    out_dir: str = Query("normalized_results"),
+):
+    if not HAS_SF:
+        raise HTTPException(status_code=500, detail="soundfile not installed on server")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    if not file.filename.lower().endswith(".wav"):
+        raise HTTPException(status_code=400, detail="Only .wav files are supported")
+
+    flags_list: List[str] = []
+    if flags_file is not None:
+        try:
+            raw = await flags_file.read()
+            payload = json.loads(raw.decode("utf-8"))
+            if isinstance(payload, dict) and "flags" in payload:
+                flags_list = parse_flags(str(payload.get("flags", "")))
+            elif isinstance(payload, list):
+                flags_list = [str(x).strip() for x in payload if str(x).strip()]
+            elif isinstance(payload, str):
+                flags_list = parse_flags(payload)
+        except Exception:
+            flags_list = []
+        finally:
+            await flags_file.close()
+
+    if not flags_list:
+        flags_list = parse_flags(flags)
+    cfg = QCConfig()
+
+    tmp_path = await run_in_threadpool(save_upload_to_temp, file)
+    try:
+        x, sr = await run_in_threadpool(lambda: sf.read(tmp_path, dtype="float32", always_2d=True))
+        sr = int(sr)
+
+        result = normalize_audio_by_flags(
+            x,
+            sr,
+            flags_list,
+            target_lufs=target_lufs,
+            max_gain_db=max_gain_db,
+            limiter_ceiling=limiter_ceiling,
+            force_lufs=force_lufs,
+            no_gain_limit=no_gain_limit,
+        )
+        y = result["audio"]
+    finally:
+        await file.close()
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    out_dir = ensure_dir(out_dir)
+    base = os.path.basename(file.filename)
+    name = os.path.splitext(base)[0] + "_norm.wav"
+    out_path = os.path.join(out_dir, name)
+
+    await run_in_threadpool(sf.write, out_path, y, sr, "PCM_16")
+
+    return {
+        "file_name": base,
+        "output_path": out_path,
+        "flags_in": flags_list,
+        "actions": result["actions"],
+        "manual_flags": result["manual_flags"],
+        "target_lufs": target_lufs,
+    }
+
+
+@app.post("/api/v1/normalize/batch")
+async def normalize_batch(req: NormalizeBatchRequest = Body(...)):
+    if not HAS_SF:
+        raise HTTPException(status_code=500, detail="soundfile not installed on server")
+    if not req.input_path:
+        raise HTTPException(status_code=400, detail="input_path is required")
+
+    paths = list_wav_paths(req.input_path, recursive=req.recursive)
+    if not paths:
+        raise HTTPException(status_code=404, detail="No wav files found")
+
+    flags_map = {}
+    if req.flags_map_path:
+        try:
+            flags_map = load_flags_map(req.flags_map_path)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    out_dir = ensure_dir(req.out_dir)
+
+    def _run_batch():
+        results = []
+        errors = []
+        for p in paths:
+            try:
+                base = os.path.basename(p)
+                flags_raw = flags_map.get(base, req.default_flags)
+                flags_list = parse_flags(flags_raw)
+                x, sr = sf.read(p, dtype="float32", always_2d=True)
+                sr = int(sr)
+
+                norm = normalize_audio_by_flags(
+                    x,
+                    sr,
+                    flags_list,
+                    target_lufs=req.target_lufs,
+                    max_gain_db=req.max_gain_db,
+                    limiter_ceiling=req.limiter_ceiling,
+                    force_lufs=req.force_lufs,
+                    no_gain_limit=req.no_gain_limit,
+                )
+                y = norm["audio"]
+
+                name = os.path.splitext(base)[0] + "_norm.wav"
+                out_path = os.path.join(out_dir, name)
+                sf.write(out_path, y, sr, "PCM_16")
+
+                results.append(
+                    {
+                        "file_name": base,
+                        "output_path": out_path,
+                        "flags_in": flags_list,
+                        "actions": norm["actions"],
+                        "manual_flags": norm["manual_flags"],
+                    }
+                )
+            except Exception as e:
+                errors.append({"file_name": os.path.basename(p), "error": str(e)})
+        return results, errors
+
+    results, errors = await run_in_threadpool(_run_batch)
+
+    payload: Dict[str, Any] = {
+        "count": len(results),
+        "errors": errors,
+    }
+    if req.return_results:
+        payload["results"] = results
+    return payload
 
 
 def main():
