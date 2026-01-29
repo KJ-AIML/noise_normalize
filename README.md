@@ -547,16 +547,192 @@ F3 -> sample_30s.wav     (สี #2ca02c)
 
 ## Flags คืออะไร? (การคัดไฟล์อัตโนมัติ)
 
-คอลัมน์ `flags` เป็นการรวม “ธงเตือน” หลายแบบ เช่น:
+คอลัมน์ `flags` เป็นการรวม "ธงเตือน" หลายแบบ เพื่อระบุไฟล์ที่มีปัญหาคุณภาพ โดยแต่ละ flag จะถูกเปิดเมื่อค่า metric หลุดจาก threshold ที่กำหนด
 
-* `low_speech_ratio` : speech_ratio_any ต่ำกว่า `flag_min_speech_ratio`
-* `low_snr` : est_snr_db_best ต่ำกว่า `flag_min_snr_db`
-* `clipping` : clipping_pct_max สูงกว่า `flag_max_clipping_pct`
-* `dropouts_or_dead_samples` : longest_zero_run_ms_max สูงเกิน
-* `high_overlap_double_talk` : overlap_ratio สูงเกิน
-* `too_quiet_lufs` / `too_loud_lufs` : LUFS หลุดช่วง
+---
 
-> แนะนำ: ใช้ flags เป็น “รายการตรวจ” ไม่ใช่ตัดทิ้งแบบทันที แล้วค่อยปรับ threshold ให้เข้ากับ dataset ของคุณ
+## รายละเอียด Flags ทุกตัว
+
+### 1. `low_speech_ratio`
+
+**หมายถึง:** สัดส่วนเวลาที่มีคนพูดต่ำเกินไป
+
+**เกณฑ์:** `speech_ratio_any < 0.15` (15%)
+
+**เกิดเมื่อ:**
+- ไฟล์ส่วนใหญ่เงียบ
+- Dead call / Hold music / Ringtone
+- บันทึกผิดช่วง (เช่น โทรยังไม่ต่อ)
+
+**ผลต่อ ASR:**
+- ไม่มีบทสนทนาให้ถอด
+- ASR อาจหลุด / ไม่ทำงาน
+
+**ควรทำอย่างไร:**
+- ตัดทิ้งไฟล์ (ไม่มีประโยชน์)
+- หรือตรวจว่าเป็น hold music / ringtone หรือไม่
+
+---
+
+### 2. `low_snr`
+
+**หมายถึง:** Signal-to-Noise Ratio ต่ำเกินไป
+
+**เกณฑ์:** `est_snr_db_best < 10 dB`
+
+**เกิดเมื่อ:**
+- Noise สูงมาก (พัดลม, ถนน, คนเยอะ)
+- เสียงพูดเบากว่าพื้นหลัง
+- ไมค์แย่ / ห่างเกินไป
+
+**ผลต่อ ASR:**
+- WER สูงมาก
+- ASR ไม่ได้ยินคำชัด
+- คำผิดเยอะ
+
+**ควรทำอย่างไร:**
+- ถ้า SNR 5-10 dB → อาจลองใช้ noise reduction
+- ถ้า SNR < 5 dB → ควรตัดทิ้ง
+
+---
+
+### 3. `clipping`
+
+**หมายถึง:** เสียงแตก / เกิน limit ของ digital
+
+**เกณฑ์:** `clipping_pct_max > 0.10` (10% ของ samples)
+
+**เกิดเมื่อ:**
+- Gain สูงเกินไป / AGC แรง
+- ไมค์อยู่ใกล้ลำโพง
+- Preamp overload
+
+**ผลต่อ ASR:**
+- เสียงแตก / distortion
+- ASR พุ่ง error
+- คำทับซ้อน
+
+**ควรทำอย่างไร:**
+- ลด gain / ปรับ AGC
+- หรือตัดทิ้ง (hard to fix)
+
+---
+
+### 4. `dropouts_or_dead_samples`
+
+**หมายถึง:** มีช่วง near-zero / เสียงขาด
+
+**เกณฑ์:** `longest_zero_run_ms_max > 500 ms`
+
+**เกิดเมื่อ:**
+- Packet loss / Network issue
+- Mic mute / ตัดช่วง
+- Hardware dropout
+
+**ผลต่อ ASR:**
+- คำหาย / ประโยคขาด
+- ASR ตัดผิดจุด
+
+**ควรทำอย่างไร:**
+- ตรวจว่า dropout ยาวแค่ไหน
+- ถ้า < 500ms → อาจรับได้
+- ถ้า > 1s → ควรตรวจ / แก้ source
+
+---
+
+### 5. `high_overlap_double_talk`
+
+**หมายถึง:** Overlap สูง / พูดพร้อมกันเยอะ
+
+**เกณฑ์:** `overlap_ratio > 0.20` (20% ของเวลา)
+
+**เกิดเมื่อ:**
+- Agent และ Caller พูดพร้อมกันบ่อย
+- Crosstalk สูง
+- ไม่ได้แยกคนจริง (channel เหมือนกัน)
+
+**ผลต่อ ASR:**
+- Diarization ยาก
+- ASR อาจผสมคำ 2 คน
+- Conversation analysis ยาก
+
+**ควรทำอย่างไร:**
+- ถ้า stereo แยกคน → ดี
+- ถ้า mono → ใช้ diarization model ช่วย
+
+---
+
+### 6. `too_quiet_lufs`
+
+**หมายถึง:** เสียงเบาเกินไป
+
+**เกณฑ์:** `lufs_i < -40 LUFS`
+
+**เกิดเมื่อ:**
+- Gain ต่ำ
+- Mic ห่าง
+- บันทึกเบาไป
+
+**ผลต่อ ASR:**
+- ASR หลุดคำ
+- ไม่ได้ยินชัด
+
+**ควรทำอย่างไร:**
+- Normalize / Gain boost
+- ตรวจ recording level
+
+---
+
+### 7. `too_loud_lufs`
+
+**หมายถึง:** เสียงดังเกินไป
+
+**เกณฑ์:** `lufs_i > -12 LUFS`
+
+**เกิดเมื่อ:**
+- Gain สูง
+- AGC แรง
+- อัดใกล้ mic ไป
+
+**ผลต่อ ASR:**
+- อาจเกิด clipping
+- เสียงดังเกินไปอาจ distort
+
+**ควรทำอย่างไร:**
+- ลด gain
+- ตรวจว่า clipping หรือไม่
+
+---
+
+## ตารางสรุป Flags
+
+| Flag | ปัญหา | Threshold | ผลต่อ ASR | ควรทำอย่างไร |
+|------|--------|-----------|-------------|----------------|
+| `low_speech_ratio` | ไม่มีบทสนทนา | speech < 15% | ไม่มีข้อมูล | ตัดทิ้ง |
+| `low_snr` | Noise สูง | SNR < 10 dB | WER สูง | ลอง NR หรือตัดทิ้ง |
+| `clipping` | เสียงแตก | > 10% samples | Distortion | ตรวจ source หรือตัดทิ้ง |
+| `dropouts_or_dead_samples` | เสียงขาด | > 500 ms | คำหาย | ตรวจ network / hardware |
+| `high_overlap_double_talk` | พูดพร้อมกัน | > 20% เวลา | Diarization ยาก | ใช้ model ช่วย |
+| `too_quiet_lufs` | เสียงเบา | < -40 LUFS | หลุดคำ | Normalize |
+| `too_loud_lufs` | เสียงดัง | > -12 LUFS | อาจ clipping | ลด gain |
+
+---
+
+## Threshold ทั้งหมด (ปรับได้ใน `QCConfig`)
+
+```python
+flag_min_speech_ratio: float = 0.15      # 15%
+flag_min_snr_db: float = 10.0            # 10 dB
+flag_max_clipping_pct: float = 0.10      # 10%
+flag_longest_zero_run_ms: float = 500    # 500 ms
+flag_high_overlap_ratio: float = 0.20    # 20%
+flag_lufs_too_quiet: float = -40.0       # -40 LUFS
+flag_lufs_too_loud: float = -12.0        # -12 LUFS
+```
+
+---
+
+> แนะนำ: ใช้ flags เป็น "รายการตรวจ" ไม่ใช่ตัดทิ้งแบบทันที แล้วค่อยปรับ threshold ให้เข้ากับ dataset ของคุณ
 
 ---
 
